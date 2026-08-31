@@ -500,6 +500,18 @@ class _ProbePageState extends State<ProbePage> {
   /// decent wifi.
   void _startUploadLoop() {
     _uploadTimer?.cancel();
+
+    // Probe the host once at startup and say so either way. Without this a
+    // silent backlog looks identical to having nothing to upload, and the first
+    // time anyone notices is when the phone is full.
+    () async {
+      final up = await _uploader.reachable();
+      _say(up
+          ? 'host reachable at ${_uploader.host}:${_uploader.port}'
+          : 'host NOT reachable at ${_uploader.host}:${_uploader.port} — '
+              'segments will queue on the phone');
+    }();
+
     _uploadTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
       final r = await _uploader.run();
       if (!r.idle) {
