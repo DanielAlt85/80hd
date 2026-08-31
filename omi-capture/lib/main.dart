@@ -55,6 +55,27 @@ class CaptureService {
       olog('foreground service failed to stop: $e');
     }
   }
+
+  /// Rewrite the ongoing notification. It is the only thing the user sees for
+  /// hours at a time, so it has to say what is actually happening rather than a
+  /// reassuring constant.
+  static Future<void> update(String title, String body) async {
+    try {
+      await _channel.invokeMethod('update', {'title': title, 'body': body});
+    } catch (e) {
+      olog('notification update failed: $e');
+    }
+  }
+
+  /// A separate, audible, dismissible notification for something being wrong.
+  static Future<void> alert(String title, String body) async {
+    try {
+      await _channel.invokeMethod('alert', {'title': title, 'body': body});
+      olog('ALERT: $title — $body');
+    } catch (e) {
+      olog('alert failed: $e');
+    }
+  }
 }
 
 String hex(List<int> b) =>
@@ -133,6 +154,21 @@ class _ProbePageState extends State<ProbePage> {
   Timer? _uploadTimer;
   int _uploaded = 0;
 
+  // Health. The failure this app has to catch is not crashing — it is sitting
+  // there looking fine while recording nothing. So the notification says what
+  // is actually happening, and a watchdog escalates when it stops being true
+  // for long enough to matter.
+  Timer? _healthTimer;
+  DateTime? _linkDownSince;
+  DateTime? _hostDownSince;
+  bool _linkAlerted = false;
+  bool _hostAlerted = false;
+  bool _hostReachable = false;
+  int _queued = 0;
+
+  static const _linkAlertAfter = Duration(minutes: 5);
+  static const _hostAlertAfter = Duration(minutes: 30);
+
   void _say(String s) {
     olog(s);
     if (!mounted) return;
@@ -180,6 +216,7 @@ class _ProbePageState extends State<ProbePage> {
     await CaptureService.start();
     _say('upload host: ${_uploader.host}:${_uploader.port}');
     _startUploadLoop();
+    _startHealthLoop();
 
     if (!await FlutterBluePlus.isSupported) {
       _setStatus('BLE unsupported on this device');
@@ -498,6 +535,71 @@ class _ProbePageState extends State<ProbePage> {
   /// whenever the network allows it, including while the pendant is off or out
   /// of range — which is exactly when the phone is likely to be somewhere with
   /// decent wifi.
+  /// Runs regardless of Bluetooth state, unlike the stats timer. The whole
+  /// point is to notice when the pendant is NOT connected, which is exactly
+  /// when a connection-scoped timer would not be running.
+  void _startHealthLoop() {
+    _healthTimer?.cancel();
+    _healthTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
+      _queued = (await _writer.listSegments()).length;
+      _hostReachable = await _uploader.reachable();
+      final now = DateTime.now();
+
+      if (_hostReachable) {
+        _hostDownSince = null;
+        _hostAlerted = false;
+      } else {
+        _hostDownSince ??= now;
+        // Only worth interrupting for if there is something stuck. An
+        // unreachable host with an empty queue has cost us nothing yet.
+        if (!_hostAlerted &&
+            _queued > 0 &&
+            now.difference(_hostDownSince!) > _hostAlertAfter) {
+          _hostAlerted = true;
+          await CaptureService.alert(
+            'Audio is not reaching the host',
+            '$_queued segments waiting on the phone. '
+                '${_uploader.host} has been unreachable for '
+                '${now.difference(_hostDownSince!).inMinutes} minutes.',
+          );
+        }
+      }
+
+      if (_linkUp) {
+        _linkDownSince = null;
+        _linkAlerted = false;
+      } else {
+        _linkDownSince ??= now;
+        if (!_linkAlerted &&
+            now.difference(_linkDownSince!) > _linkAlertAfter) {
+          _linkAlerted = true;
+          // Deliberately does not claim to know which. A three-second hold
+          // powers the pendant off and sends nothing, so "off" and "out of
+          // range" are indistinguishable from here.
+          await CaptureService.alert(
+            'Not recording',
+            'The pendant has been unreachable for '
+                '${now.difference(_linkDownSince!).inMinutes} minutes. It may '
+                'be powered off, out of range, or its battery may be flat.',
+          );
+        }
+      }
+
+      await _refreshNotification();
+      if (mounted) setState(() {});
+    });
+  }
+
+  Future<void> _refreshNotification() async {
+    final title = _linkUp ? 'Recording' : 'Not connected';
+    final parts = <String>[
+      if (_linkUp) '$_bursts bursts captured' else 'looking for the pendant',
+      if (_queued > 0) '$_queued waiting to upload',
+      if (!_hostReachable) 'host unreachable',
+    ];
+    await CaptureService.update(title, parts.join(' · '));
+  }
+
   void _startUploadLoop() {
     _uploadTimer?.cancel();
 
@@ -569,6 +671,7 @@ class _ProbePageState extends State<ProbePage> {
   Future<void> _teardown() async {
     _stopping = true;
     _uploadTimer?.cancel();
+    _healthTimer?.cancel();
     _statsTimer?.cancel();
     await _scanSub?.cancel();
     for (final s in _charSubs) {
@@ -601,6 +704,7 @@ class _ProbePageState extends State<ProbePage> {
                 Text('packets $_packets   bytes $_audioBytes   '
                     'gaps $_gaps   mtu $_mtu'),
                 Text('bursts $_bursts   segments $_segments   uploaded $_uploaded   '
+                    'queued $_queued   '
                     'reconnects $_reconnects'),
                 Text(_lastButton >= 0
                     ? 'last button: ${ButtonEvent.describe(_lastButton)}'

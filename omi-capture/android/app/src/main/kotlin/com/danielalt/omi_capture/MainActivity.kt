@@ -27,6 +27,22 @@ class MainActivity : FlutterActivity() {
                     // build needing CMake and the NDK to answer this one
                     // question. App-private storage: nothing else on the phone
                     // can read it, and it goes away with the app.
+                    "update" -> {
+                        CaptureService.update(
+                            this,
+                            call.argument<String>("title") ?: "Capturing",
+                            call.argument<String>("body") ?: "",
+                        )
+                        result.success(null)
+                    }
+                    "alert" -> {
+                        CaptureService.alert(
+                            this,
+                            call.argument<String>("title") ?: "Capture problem",
+                            call.argument<String>("body") ?: "",
+                        )
+                        result.success(null)
+                    }
                     "filesDir" -> result.success(filesDir.absolutePath)
                     else -> result.notImplemented()
                 }
