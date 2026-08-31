@@ -1,0 +1,8 @@
+# Flutter / Dart
+omi-capture/.dart_tool/
+omi-capture/build/
+omi-capture/.flutter-plugins-dependencies
+omi-capture/android/.gradle/
+omi-capture/android/local.properties
+*.iml
+.idea/

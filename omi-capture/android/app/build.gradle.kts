@@ -1,0 +1,58 @@
+plugins {
+    id("com.android.application")
+    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
+    id("dev.flutter.flutter-gradle-plugin")
+}
+
+android {
+    namespace = "com.danielalt.omi_capture"
+    // 36 (Android 16), pinned rather than tracking flutter.compileSdkVersion.
+    // API 37 is deliberately avoided: Android's new minor API levels install as
+    // "android-37.0" with a matching ApiLevel, and Gradle resolves targets by
+    // the integer hash "android-37", so the platform is unusable until Google's
+    // tooling agrees with itself. Nothing here needs 37.
+    compileSdk = 36
+    ndkVersion = flutter.ndkVersion
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    defaultConfig {
+        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
+        applicationId = "com.danielalt.omi_capture"
+        // You can update the following values to match your application needs.
+        // For more information, see: https://flutter.dev/to/review-gradle-config.
+        // 26 rather than Flutter's default: the BLE permission model we rely on
+        // (BLUETOOTH_SCAN with neverForLocation) and typed foreground services
+        // are not worth back-porting for a device this app only ever talks to
+        // over BLE.
+        minSdk = 26
+        targetSdk = 36
+        // Uses the version code from pubspec.yaml. When using split APKs, 1000 * ABI_VERSION
+        // is added automatically by Flutter. (https://developer.android.com/studio/build/configure-apk-splits#configure-APK-versions)
+        // You can force using the value of versionCode by specifying the `-P force-version-code-ignoring-abi=true`
+        // flag during build.
+        versionCode = flutter.versionCode
+        versionName = flutter.versionName
+    }
+
+    buildTypes {
+        release {
+            // TODO: Add your own signing config for the release build.
+            // Signing with the debug keys for now, so `flutter run --release` works.
+            signingConfig = signingConfigs.getByName("debug")
+        }
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+    }
+}
+
+flutter {
+    source = "../.."
+}
