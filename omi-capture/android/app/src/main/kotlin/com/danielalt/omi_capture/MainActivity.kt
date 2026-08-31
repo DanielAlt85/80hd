@@ -23,6 +23,11 @@ class MainActivity : FlutterActivity() {
                         CaptureService.stop(this)
                         result.success(null)
                     }
+                    // Rather than path_provider, which pulls in a native jni
+                    // build needing CMake and the NDK to answer this one
+                    // question. App-private storage: nothing else on the phone
+                    // can read it, and it goes away with the app.
+                    "filesDir" -> result.success(filesDir.absolutePath)
                     else -> result.notImplemented()
                 }
             }

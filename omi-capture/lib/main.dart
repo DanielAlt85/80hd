@@ -20,6 +20,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
 import 'omi_gatt.dart';
+import 'segment_writer.dart';
 
 void main() => runApp(const ProbeApp());
 
@@ -119,6 +120,14 @@ class _ProbePageState extends State<ProbePage> {
   // as a dropped link starts a second connect flow racing the first. Only a
   // disconnect that follows an actual connected event counts.
   bool _linkUp = false;
+
+  // Opening a file is asynchronous and frames arrive at fifty a second, so the
+  // first frames of a burst — the ones carrying the start of a word — would be
+  // dropped on the floor while the open completes. They get queued instead.
+  final _writer = SegmentWriter();
+  final List<(DateTime, int, List<int>)> _pending = [];
+  bool _opening = false;
+  int _segments = 0;
 
   void _say(String s) {
     olog(s);
@@ -308,6 +317,7 @@ class _ProbePageState extends State<ProbePage> {
               '${last.difference(_burstStartedAt!).inMilliseconds}ms of audio, '
               'silent for ${idle.inSeconds}s');
           _burstStartedAt = null;
+          _closeSegment();
         }
       }
       _say('stats: packets=$_packets bytes=$_audioBytes gaps=$_gaps '
@@ -414,8 +424,15 @@ class _ProbePageState extends State<ProbePage> {
       _burstStartedAt = now;
       _say('BURST start #$_bursts'
           '${since == null ? "" : " after ${since.inMilliseconds}ms silence"}');
+      _openSegment(now);
     }
     _lastPacketAt = now;
+
+    if (_opening) {
+      _pending.add((now, p.index, p.opus));
+    } else {
+      _writer.write(now, p.index, p.opus);
+    }
 
     _packets++;
     _audioBytes += p.opus.length;
@@ -463,6 +480,36 @@ class _ProbePageState extends State<ProbePage> {
     await _scan();
   }
 
+  void _openSegment(DateTime now) {
+    _opening = true;
+    _writer.open(now).then((f) {
+      _opening = false;
+      _segments++;
+      for (final (at, index, opus) in _pending) {
+        _writer.write(at, index, opus);
+      }
+      _say('segment open: ${f.path.split('/').last} '
+          '(${_pending.length} queued frames flushed)');
+      _pending.clear();
+    }).catchError((Object e) {
+      _opening = false;
+      _pending.clear();
+      _say('segment open FAILED: $e');
+    });
+  }
+
+  Future<void> _closeSegment() async {
+    if (!_writer.isOpen) return;
+    final name = _writer.path?.split('/').last ?? '?';
+    final frames = _writer.frames;
+    final bytes = _writer.bytes;
+    await _writer.close();
+    _say('segment closed: $name  $frames frames, $bytes bytes '
+        '(${(frames * 20 / 1000).toStringAsFixed(1)}s of audio)');
+    _say('on disk: ${await _writer.totalBytesOnDisk()} bytes across '
+        '${(await _writer.listSegments()).length} segments');
+  }
+
   BluetoothCharacteristic? _find(
       BluetoothDevice device, Guid service, Guid characteristic) {
     for (final s in device.servicesList) {
@@ -490,6 +537,7 @@ class _ProbePageState extends State<ProbePage> {
       await d.disconnect();
     }
     await _connSub?.cancel();
+    await _closeSegment();
     await CaptureService.stop();
   }
 
@@ -509,6 +557,8 @@ class _ProbePageState extends State<ProbePage> {
                 const SizedBox(height: 6),
                 Text('packets $_packets   bytes $_audioBytes   '
                     'gaps $_gaps   mtu $_mtu'),
+                Text('bursts $_bursts   segments $_segments   '
+                    'reconnects $_reconnects'),
                 Text(_lastButton >= 0
                     ? 'last button: ${ButtonEvent.describe(_lastButton)}'
                     : 'last button: none'),
