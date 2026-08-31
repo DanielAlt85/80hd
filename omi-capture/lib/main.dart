@@ -20,6 +20,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
 import 'omi_gatt.dart';
 import 'segment_writer.dart';
+import 'uploader.dart';
 
 void main() => runApp(const ProbeApp());
 
@@ -128,6 +129,10 @@ class _ProbePageState extends State<ProbePage> {
   bool _opening = false;
   int _segments = 0;
 
+  late final Uploader _uploader = Uploader(writer: _writer, log: _say);
+  Timer? _uploadTimer;
+  int _uploaded = 0;
+
   void _say(String s) {
     olog(s);
     if (!mounted) return;
@@ -173,6 +178,8 @@ class _ProbePageState extends State<ProbePage> {
     // process mid-scan, and a frozen process never reaches the line that would
     // have saved it.
     await CaptureService.start();
+    _say('upload host: ${_uploader.host}:${_uploader.port}');
+    _startUploadLoop();
 
     if (!await FlutterBluePlus.isSupported) {
       _setStatus('BLE unsupported on this device');
@@ -487,6 +494,22 @@ class _ProbePageState extends State<ProbePage> {
     await _scan();
   }
 
+  /// Independent of the Bluetooth state on purpose. A backlog should drain
+  /// whenever the network allows it, including while the pendant is off or out
+  /// of range — which is exactly when the phone is likely to be somewhere with
+  /// decent wifi.
+  void _startUploadLoop() {
+    _uploadTimer?.cancel();
+    _uploadTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
+      final r = await _uploader.run();
+      if (!r.idle) {
+        _uploaded += r.uploaded;
+        _say('upload pass: $r');
+        if (mounted) setState(() {});
+      }
+    });
+  }
+
   void _openSegment(DateTime now) {
     _opening = true;
     _writer.open(now).then((f) {
@@ -533,6 +556,7 @@ class _ProbePageState extends State<ProbePage> {
   /// is what "error 133 for no reason" usually turns out to be.
   Future<void> _teardown() async {
     _stopping = true;
+    _uploadTimer?.cancel();
     _statsTimer?.cancel();
     await _scanSub?.cancel();
     for (final s in _charSubs) {
@@ -564,7 +588,7 @@ class _ProbePageState extends State<ProbePage> {
                 const SizedBox(height: 6),
                 Text('packets $_packets   bytes $_audioBytes   '
                     'gaps $_gaps   mtu $_mtu'),
-                Text('bursts $_bursts   segments $_segments   '
+                Text('bursts $_bursts   segments $_segments   uploaded $_uploaded   '
                     'reconnects $_reconnects'),
                 Text(_lastButton >= 0
                     ? 'last button: ${ButtonEvent.describe(_lastButton)}'
