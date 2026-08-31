@@ -39,10 +39,16 @@ class SegmentWriter {
   static const _magic = 'OMICAP01';
   static const _headerLen = 32;
 
-  /// Frames buffered before hitting the disk. At 50 frames a second this is a
-  /// flush roughly every second — often enough that a crash costs almost
-  /// nothing, rare enough that we are not doing 50 syscalls a second.
-  static const _flushEvery = 50;
+  // Nothing flushes on the packet path.
+  //
+  // The first capture skipped exactly one packet index every 50 frames, five
+  // times without deviation — and 50 was the flush interval at the time. Halving
+  // it to 25 did not move the skips to every 25; it removed them. That points at
+  // the flush without quite proving it (a cold first-file-creation would look
+  // similar), but tuning how often we stall the packet path was the wrong
+  // question. IOSink already buffers and writes asynchronously, so flushing is
+  // only about how much a crash costs. That is a timer's job, not the audio
+  // callback's.
 
   final int codecId;
   final int sampleRate;
@@ -51,7 +57,6 @@ class SegmentWriter {
   IOSink? _sink;
   File? _file;
   int _startEpochMs = 0;
-  int _framesSinceFlush = 0;
 
   int frames = 0;
   int bytes = 0;
@@ -93,7 +98,6 @@ class SegmentWriter {
     _sink = sink;
     frames = 0;
     bytes = 0;
-    _framesSinceFlush = 0;
     return f;
   }
 
@@ -115,11 +119,10 @@ class SegmentWriter {
 
     frames++;
     bytes += opus.length;
-    if (++_framesSinceFlush >= _flushEvery) {
-      _framesSinceFlush = 0;
-      sink.flush();
-    }
   }
+
+  /// Call from a timer, never from the audio callback.
+  Future<void> flush() async => _sink?.flush();
 
   Future<void> close() async {
     final sink = _sink;

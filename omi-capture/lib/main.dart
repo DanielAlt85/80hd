@@ -12,7 +12,6 @@
 library;
 
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -167,6 +166,14 @@ class _ProbePageState extends State<ProbePage> {
     // The shipping app needs a real prompt. Revisit once API 37 installs cleanly.
     _setStatus('starting');
 
+    // Before scanning, not after connecting. Scanning and connecting can take a
+    // while, and a device that is off or out of range means they take forever —
+    // exactly the case where the user pockets the phone. Starting the service
+    // only on success left that whole window unprotected: Android froze the
+    // process mid-scan, and a frozen process never reaches the line that would
+    // have saved it.
+    await CaptureService.start();
+
     if (!await FlutterBluePlus.isSupported) {
       _setStatus('BLE unsupported on this device');
       return;
@@ -266,10 +273,6 @@ class _ProbePageState extends State<ProbePage> {
     );
     _say('connected');
 
-    // Started as soon as the link is up, before any of the slow discovery work,
-    // so there is no window where a backgrounded app can be frozen mid-setup.
-    await CaptureService.start();
-
     // The device drives the packet-size exchange itself, and it happens after
     // the connection completes — reading device.mtu straight away just returns
     // the 23-byte BLE default. Watch it instead of sampling it once.
@@ -320,6 +323,10 @@ class _ProbePageState extends State<ProbePage> {
           _closeSegment();
         }
       }
+      // Flushing lives here, off the packet path, so a slow write can never
+      // stall the audio callback.
+      _writer.flush();
+
       _say('stats: packets=$_packets bytes=$_audioBytes gaps=$_gaps '
           'bursts=$_bursts reconnects=$_reconnects lastIndex=$_lastIndex '
           'mtu=$_mtu');
