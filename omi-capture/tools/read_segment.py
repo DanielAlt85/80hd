@@ -6,7 +6,7 @@ clean the logs looked.
 
 Usage:
     python read_segment.py seg-1788207093804.omi
-    python read_segment.py seg-*.omi --wav out.wav
+    python read_segment.py seg-*.omi --opus out.opus
 """
 
 from __future__ import annotations
@@ -17,6 +17,8 @@ import struct
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
+
+import ogg_opus
 
 MAGIC = b"OMICAP01"
 HEADER_LEN = 32
@@ -141,18 +143,39 @@ def describe(seg: Segment) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("paths", nargs="+")
+    ap.add_argument(
+        "--opus",
+        metavar="OUT",
+        help="mux the frames into a playable Ogg Opus file. With several "
+             "inputs they are concatenated in the order given.",
+    )
     args = ap.parse_args()
 
     paths: list[str] = []
     for p in args.paths:
         paths.extend(sorted(glob.glob(p)) or [p])
 
+    segments: list[Segment] = []
     for path in paths:
         try:
-            describe(read(path))
+            seg = read(path)
         except (OSError, ValueError) as e:
             print(f"{path}: {e}", file=sys.stderr)
+            continue
+        segments.append(seg)
+        describe(seg)
         print()
+
+    if args.opus and segments:
+        frames = [f.opus for seg in segments for f in seg.frames]
+        rate = segments[0].sample_rate
+        n = ogg_opus.write(args.opus, frames, input_rate=rate)
+        print(f"wrote {args.opus}: {n} frames, {n * FRAME_MS / 1000:.2f}s")
+        if len(segments) > 1:
+            # Concatenating discards the silence between bursts, which can be
+            # hours. Fine for listening, wrong for anything timed.
+            print("  note: bursts are butted together, gaps between them are "
+                  "not represented")
 
 
 if __name__ == "__main__":
