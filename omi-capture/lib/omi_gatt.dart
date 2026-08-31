@@ -35,7 +35,14 @@ class OmiGatt {
   static final buttonService = _g('23ba7924-0000-1000-7450-346eac492e92');
   static final buttonEvents = _g('23ba7925-0000-1000-7450-346eac492e92');
 
-  /// Ring buffer / onboard storage. Firmware >= 3.0.20 only; absent on 3.0.19.
+  /// Ring buffer / onboard storage.
+  ///
+  /// The notes we started from said this needs firmware >= 3.0.20. Not true:
+  /// on 3.0.19 the service is present and the status read answers with
+  /// 18-FA-0B-1E 93-00-00-00 00-00-00-00 00-00-00-00. Read as the documented
+  /// four uint32 LE that is used=504 MB, unread=147, free=0, rtc_valid=0 —
+  /// plausible but unverified, since the documented layout is for >= 3.0.20.
+  /// Do not build against this until the fields are confirmed.
   static final storageService = _g('30295780-4301-eabd-2904-2849adfeae43');
   static final storageCommand = _g('30295781-4301-eabd-2904-2849adfeae43');
   static final storageStatus = _g('30295782-4301-eabd-2904-2849adfeae43');
