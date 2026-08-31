@@ -16,6 +16,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
 import 'omi_gatt.dart';
@@ -27,6 +28,31 @@ void olog(String msg) {
   const chunk = 800;
   for (var i = 0; i < msg.length; i += chunk) {
     debugPrint('OMI ${msg.substring(i, (i + chunk).clamp(0, msg.length))}');
+  }
+}
+
+/// Starts and stops the connectedDevice foreground service. Without it Android
+/// freezes this process about eleven seconds after it leaves the foreground,
+/// mid-stream, connection still open.
+class CaptureService {
+  static const _channel = MethodChannel('omi_capture/service');
+
+  static Future<void> start() async {
+    try {
+      await _channel.invokeMethod('start');
+      olog('foreground service started');
+    } catch (e) {
+      olog('foreground service failed to start: $e');
+    }
+  }
+
+  static Future<void> stop() async {
+    try {
+      await _channel.invokeMethod('stop');
+      olog('foreground service stopped');
+    } catch (e) {
+      olog('foreground service failed to stop: $e');
+    }
   }
 }
 
@@ -70,6 +96,29 @@ class _ProbePageState extends State<ProbePage> {
   int _lastIndex = -1;
   int _lastButton = -1;
   int _mtu = 0;
+
+  // The device runs its own voice activity detection: it sends nothing at all
+  // during silence, and the packet index keeps counting straight through the
+  // gap. So the protocol gives us no way to tell a one-second pause from a
+  // twenty-minute one — only arrival time does. Every packet gets stamped on
+  // receipt, and a burst boundary is inferred from the delta.
+  DateTime? _lastPacketAt;
+  DateTime? _burstStartedAt;
+  int _bursts = 0;
+  static const _burstGap = Duration(milliseconds: 500);
+
+  // Reconnect state. _stopping distinguishes "the link dropped" from "we are
+  // shutting down on purpose" — without it, tearing the page down would kick
+  // off a reconnect against a device we just chose to let go.
+  bool _stopping = false;
+  bool _reconnecting = false;
+  int _reconnects = 0;
+
+  // connectionState replays the current value on subscribe, which is
+  // "disconnected" because the connection has not completed yet. Treating that
+  // as a dropped link starts a second connect flow racing the first. Only a
+  // disconnect that follows an actual connected event counts.
+  bool _linkUp = false;
 
   void _say(String s) {
     olog(s);
@@ -148,8 +197,15 @@ class _ProbePageState extends State<ProbePage> {
       await _connect(device);
     } on TimeoutException {
       await FlutterBluePlus.stopScan();
+      await _scanSub?.cancel();
       _setStatus('no device advertising the audio service');
-      _say('nothing found. device asleep, out of range, or not advertising.');
+      _say('nothing found. device powered off, out of range, or silent.');
+      // Keep looking. The pendant may simply be off, and it should be picked up
+      // whenever it comes back without anyone having to touch the app.
+      if (!_stopping) {
+        await Future.delayed(const Duration(seconds: 5));
+        if (!_stopping) await _scan();
+      }
     }
   }
 
@@ -169,12 +225,23 @@ class _ProbePageState extends State<ProbePage> {
       return;
     }
 
+    _linkUp = false;
     _connSub = device.connectionState.listen((s) {
       _say('connection state: $s');
-      if (s == BluetoothConnectionState.disconnected) {
-        _say('disconnect reason: ${device.disconnectReason}');
-        _setStatus('disconnected');
+      if (s == BluetoothConnectionState.connected) {
+        _linkUp = true;
+        return;
       }
+      if (!_linkUp) return; // the replayed pre-connection state, not a drop
+      _linkUp = false;
+      _say('disconnect reason: ${device.disconnectReason}');
+      _setStatus('disconnected');
+
+      // A silent disappearance is not necessarily a fault. A three-second
+      // button hold powers the pendant off and sends nothing at all, so
+      // "gone" and "broken" look identical from here. We rescan either way;
+      // if it powered off, the scan simply finds nothing until it is back.
+      if (!_stopping) _scheduleReconnect();
     });
 
     // mtu: null suppresses flutter_blue_plus's automatic 512-byte request.
@@ -189,6 +256,10 @@ class _ProbePageState extends State<ProbePage> {
       mtu: null,
     );
     _say('connected');
+
+    // Started as soon as the link is up, before any of the slow discovery work,
+    // so there is no window where a backgrounded app can be frozen mid-setup.
+    await CaptureService.start();
 
     // The device drives the packet-size exchange itself, and it happens after
     // the connection completes — reading device.mtu straight away just returns
@@ -223,9 +294,25 @@ class _ProbePageState extends State<ProbePage> {
     await _syncClock(device);
     await _subscribe(device);
 
+    // Cancel first: a reconnect runs this path again, and two live timers would
+    // interleave and double every reported figure.
+    _statsTimer?.cancel();
     _statsTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      // Close out a burst here rather than waiting for the next one to start,
+      // so a burst that is never followed by another still gets reported.
+      final last = _lastPacketAt;
+      if (last != null && _burstStartedAt != null) {
+        final idle = DateTime.now().difference(last);
+        if (idle > _burstGap) {
+          _say('BURST #$_bursts ended: '
+              '${last.difference(_burstStartedAt!).inMilliseconds}ms of audio, '
+              'silent for ${idle.inSeconds}s');
+          _burstStartedAt = null;
+        }
+      }
       _say('stats: packets=$_packets bytes=$_audioBytes gaps=$_gaps '
-          'lastIndex=$_lastIndex mtu=$_mtu');
+          'bursts=$_bursts reconnects=$_reconnects lastIndex=$_lastIndex '
+          'mtu=$_mtu');
     });
   }
 
@@ -315,6 +402,21 @@ class _ProbePageState extends State<ProbePage> {
     final p = AudioPacket.parse(raw);
     if (p == null) return;
 
+    final now = DateTime.now();
+    final since = _lastPacketAt == null ? null : now.difference(_lastPacketAt!);
+    if (since == null || since > _burstGap) {
+      if (_burstStartedAt != null && since != null) {
+        final len = _lastPacketAt!.difference(_burstStartedAt!);
+        _say('BURST end: ${len.inMilliseconds}ms of speech, '
+            'then ${since.inMilliseconds}ms of silence');
+      }
+      _bursts++;
+      _burstStartedAt = now;
+      _say('BURST start #$_bursts'
+          '${since == null ? "" : " after ${since.inMilliseconds}ms silence"}');
+    }
+    _lastPacketAt = now;
+
     _packets++;
     _audioBytes += p.opus.length;
 
@@ -334,6 +436,33 @@ class _ProbePageState extends State<ProbePage> {
     }
   }
 
+  /// Rescan and reconnect after a dropped link.
+  ///
+  /// Deliberately a fresh scan rather than autoConnect. autoConnect leans on
+  /// Android's own background scan scheduling, which is slow and — more to the
+  /// point — is the same machinery a bond record hooks into. We keep the
+  /// reconnect in our own hands where we can see it.
+  Future<void> _scheduleReconnect() async {
+    if (_reconnecting || _stopping) return;
+    _reconnecting = true;
+    _reconnects++;
+
+    // Cancel the old characteristic subscriptions before scanning; they belong
+    // to a GATT client that no longer exists.
+    _statsTimer?.cancel();
+    for (final s in _charSubs) {
+      await s.cancel();
+    }
+    _charSubs.clear();
+    await _connSub?.cancel();
+
+    _say('reconnect #$_reconnects: waiting 2s, then rescanning');
+    await Future.delayed(const Duration(seconds: 2));
+    _reconnecting = false;
+    if (_stopping) return;
+    await _scan();
+  }
+
   BluetoothCharacteristic? _find(
       BluetoothDevice device, Guid service, Guid characteristic) {
     for (final s in device.servicesList) {
@@ -349,6 +478,7 @@ class _ProbePageState extends State<ProbePage> {
   /// leaks a GATT client; Android caps the system near thirty, and exhaustion
   /// is what "error 133 for no reason" usually turns out to be.
   Future<void> _teardown() async {
+    _stopping = true;
     _statsTimer?.cancel();
     await _scanSub?.cancel();
     for (final s in _charSubs) {
@@ -360,6 +490,7 @@ class _ProbePageState extends State<ProbePage> {
       await d.disconnect();
     }
     await _connSub?.cancel();
+    await CaptureService.stop();
   }
 
   @override
@@ -406,8 +537,13 @@ class _ProbePageState extends State<ProbePage> {
             _packets = 0;
             _audioBytes = 0;
             _gaps = 0;
+            _bursts = 0;
+            _reconnects = 0;
             _lastIndex = -1;
+            _lastPacketAt = null;
+            _burstStartedAt = null;
           });
+          _stopping = false;
           await _start();
         },
         child: const Icon(Icons.refresh),
