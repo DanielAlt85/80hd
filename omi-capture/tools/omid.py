@@ -36,6 +36,18 @@ import read_segment
 import transcribe as tx
 import vault as vaultmod
 
+# Windows consoles default to a legacy codepage (cp1252 here), and Parakeet v3
+# is multilingual — one curly quote or one non-Latin character in a transcript
+# and print() raises UnicodeEncodeError. That exception escaped the per-segment
+# handler and aborted the whole pass, so a single unusual character stalled the
+# entire queue. errors="replace" rather than strict: a mangled character in a
+# log line is not worth stopping the pipeline for.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
+
 
 class State:
     """Everything the status page needs. Written by the worker, read by HTTP."""
@@ -343,6 +355,16 @@ def worker() -> None:
                 if d is None:
                     continue
                 changed = True
+                # Belt as well as braces: even with UTF-8 stdout, nothing about
+                # printing a log line should be able to stop the pipeline.
+                try:
+                    print(f"  {'KEEP' if d.kept else 'DROP'}  {d.name}  "
+                          f"{d.audio_seconds:.1f}s  {d.text[:80] or d.reason}",
+                          flush=True)
+                except Exception:
+                    print(f"  {'KEEP' if d.kept else 'DROP'}  {d.name}  "
+                          f"{d.audio_seconds:.1f}s  (text not printable)",
+                          flush=True)
                 with STATE.lock:
                     if d.kept:
                         STATE.kept += 1
@@ -355,9 +377,6 @@ def worker() -> None:
                         "text": d.text[:200],
                     })
                     del STATE.recent[40:]
-                print(f"  {'KEEP' if d.kept else 'DROP'}  {d.name}  "
-                      f"{d.audio_seconds:.1f}s  {d.text[:80] or d.reason}",
-                      flush=True)
 
             if changed:
                 # Rebuild notes rather than appending. A late segment belongs to

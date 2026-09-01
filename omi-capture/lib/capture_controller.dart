@@ -417,14 +417,24 @@ class CaptureController extends ChangeNotifier {
     if (_reconnecting || _stopping) return;
     _reconnecting = true;
     reconnects++;
-    _statsTimer?.cancel();
-    for (final s in _charSubs) {
-      await s.cancel();
+    try {
+      _statsTimer?.cancel();
+      for (final s in _charSubs) {
+        await s.cancel();
+      }
+      _charSubs.clear();
+      await _connSub?.cancel();
+      _connSub = null;
+      await _closeSegment();
+      await Future.delayed(const Duration(seconds: 2));
+    } catch (e) {
+      say('reconnect cleanup failed: $e');
+    } finally {
+      // In a finally, always. If anything above threw, _reconnecting stayed
+      // true forever and every future reconnect returned at the guard on the
+      // first line — the app would never try again for the life of the process.
+      _reconnecting = false;
     }
-    _charSubs.clear();
-    await _connSub?.cancel();
-    await Future.delayed(const Duration(seconds: 2));
-    _reconnecting = false;
     if (!_stopping) await _scan();
   }
 
@@ -663,6 +673,7 @@ class CaptureController extends ChangeNotifier {
   void _startHealthLoop() {
     _healthTimer?.cancel();
     _healthTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
+      await _reconcileLink();
       queued = (await _writer.listSegments()).length;
       hostReachable = await _uploader.reachable();
       final now = DateTime.now();
@@ -708,6 +719,34 @@ class CaptureController extends ChangeNotifier {
       await _refreshNotification();
       notifyListeners();
     });
+  }
+
+  /// Believe the radio, not our memory of it.
+  ///
+  /// _linkUp was set only by a connectionState event. Miss that event once —
+  /// the pendant powered off with a three second hold, the subscription
+  /// cancelled at the wrong moment, the callback swallowed — and the app
+  /// insists it is "Listening" forever while recording nothing. That is the
+  /// worst failure this app can have, and it was resting on a single stream
+  /// event with nothing checking it afterwards.
+  Future<void> _reconcileLink() async {
+    final d = _device;
+    final actually = d != null && d.isConnected;
+    if (actually == _linkUp) return;
+
+    say('link state was wrong: showing '
+        '${_linkUp ? "connected" : "disconnected"}, radio says '
+        '${actually ? "connected" : "disconnected"}');
+    _linkUp = actually;
+
+    if (!actually) {
+      link = LinkState.idle;
+      await _closeSegment();
+      if (!_stopping) _scheduleReconnect();
+    } else {
+      link = LinkState.connected;
+    }
+    notifyListeners();
   }
 
   Future<void> _refreshNotification() async {
