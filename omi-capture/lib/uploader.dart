@@ -39,30 +39,35 @@ class UploadResult {
 }
 
 class Uploader {
-  /// The Acer, on the tailnet by default. Reachable from anywhere the phone has
-  /// a network, which is the entire reason Tailscale is in this picture. The
-  /// LAN address deliberately is not the default: the house wifi is classified
-  /// Public by Windows and blocked inbound, and a LAN address would stop
-  /// working the moment the phone left the house anyway.
+  /// The host, as a full base URL.
+  ///
+  /// This is a `tailscale serve` endpoint rather than an address and port. That
+  /// matters for a reason beyond tidiness: serve is proxied by the Tailscale
+  /// daemon, which already holds its own firewall permission, so nothing has to
+  /// be opened on the host. Pointing at the raw tailnet IP instead means
+  /// Windows Firewall gets a vote, and on a machine whose wifi is classified
+  /// Public it votes no.
+  ///
+  /// It is also a real HTTPS certificate, so the traffic is encrypted twice
+  /// over — once by TLS, once by WireGuard — and Dart validates it without any
+  /// certificate pinning of ours.
   ///
   /// Override for testing over the USB cable:
   ///   adb reverse tcp:8723 tcp:8723
-  ///   flutter build apk --debug --dart-define=OMI_HOST=127.0.0.1
-  static const defaultHost =
-      String.fromEnvironment('OMI_HOST', defaultValue: '100.97.96.79');
-  static const defaultPort =
-      int.fromEnvironment('OMI_PORT', defaultValue: 8723);
+  ///   flutter build apk --debug --dart-define=OMI_URL=http://127.0.0.1:8723
+  static const defaultBase = String.fromEnvironment(
+    'OMI_URL',
+    defaultValue: 'https://laptop-6r23fikn.tailaf1550.ts.net',
+  );
 
-  final String host;
-  final int port;
+  final String base;
   final SegmentWriter writer;
   final void Function(String) log;
 
   Uploader({
     required this.writer,
     required this.log,
-    this.host = defaultHost,
-    this.port = defaultPort,
+    this.base = defaultBase,
   });
 
   bool _running = false;
@@ -70,7 +75,7 @@ class Uploader {
   Future<bool> reachable() async {
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 5);
     try {
-      final req = await client.getUrl(Uri.parse('http://$host:$port/health'));
+      final req = await client.getUrl(Uri.parse('$base/health'));
       final res = await req.close().timeout(const Duration(seconds: 5));
       await res.drain<void>();
       return res.statusCode == 200;
@@ -117,9 +122,7 @@ class Uploader {
         final local = sha256.convert(bytes).toString();
 
         try {
-          final req = await client.postUrl(
-            Uri.parse('http://$host:$port/upload/$name'),
-          );
+          final req = await client.postUrl(Uri.parse('$base/upload/$name'));
           req.headers.contentType = ContentType.binary;
           req.contentLength = bytes.length;
           req.add(bytes);

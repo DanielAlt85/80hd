@@ -214,7 +214,7 @@ class _ProbePageState extends State<ProbePage> {
     // process mid-scan, and a frozen process never reaches the line that would
     // have saved it.
     await CaptureService.start();
-    _say('upload host: ${_uploader.host}:${_uploader.port}');
+    _say('upload host: ${_uploader.base}');
     _startUploadLoop();
     _startHealthLoop();
 
@@ -559,7 +559,7 @@ class _ProbePageState extends State<ProbePage> {
           await CaptureService.alert(
             'Audio is not reaching the host',
             '$_queued segments waiting on the phone. '
-                '${_uploader.host} has been unreachable for '
+                '${_uploader.base} has been unreachable for '
                 '${now.difference(_hostDownSince!).inMinutes} minutes.',
           );
         }
@@ -609,8 +609,8 @@ class _ProbePageState extends State<ProbePage> {
     () async {
       final up = await _uploader.reachable();
       _say(up
-          ? 'host reachable at ${_uploader.host}:${_uploader.port}'
-          : 'host NOT reachable at ${_uploader.host}:${_uploader.port} — '
+          ? 'host reachable at ${_uploader.base}'
+          : 'host NOT reachable at ${_uploader.base} — '
               'segments will queue on the phone');
     }();
 
