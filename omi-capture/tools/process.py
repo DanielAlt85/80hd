@@ -75,7 +75,7 @@ def process_one(path: str, model, ffmpeg: str, audio_dir: str,
         wav = tmp.name
     try:
         tx.to_wav(seg, ffmpeg, wav)
-        text = model.recognize(wav).strip()
+        text = tx.recognize(model, wav).strip()
     finally:
         os.unlink(wav)
 

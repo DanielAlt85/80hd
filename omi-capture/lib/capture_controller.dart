@@ -94,6 +94,7 @@ class CaptureController extends ChangeNotifier {
   bool _linkUp = false;
   bool _stopping = false;
   bool _reconnecting = false;
+  bool _scanning = false;
   DateTime? linkSince;
   DateTime? _linkDownSince;
   String? lastDisconnectReason;
@@ -157,6 +158,7 @@ class CaptureController extends ChangeNotifier {
   }
 
   String get serverBase => _uploader.base;
+  String? get serverError => _uploader.lastError;
 
   void say(String s) {
     olog(s);
@@ -249,9 +251,47 @@ class CaptureController extends ChangeNotifier {
 
   // -------------------------------------------------------------------- link
 
+  /// Keep trying until connected or told to stop.
+  ///
+  /// The previous version caught only TimeoutException around the scan, so a
+  /// failed *connection* — error 133, a link dropped mid-handshake, anything —
+  /// escaped the loop and killed the retry machinery outright. The app then sat
+  /// on "connecting" forever and never tried again, which is the exact failure
+  /// this whole project exists to eliminate. Nothing gets out of here now.
   Future<void> _scan() async {
+    if (_scanning || _stopping) return;
+    _scanning = true;
+    var attempt = 0;
+    try {
+      while (!_stopping && !_linkUp) {
+        attempt++;
+        if (await _scanOnce(attempt)) return;
+        if (_stopping) return;
+        // Backoff, capped. A pendant that is switched off should not be
+        // hammered every five seconds all night, but it also must not take ten
+        // minutes to notice once it comes back.
+        final wait = switch (attempt) {
+          1 || 2 => 5,
+          3 || 4 => 10,
+          5 || 6 => 20,
+          _ => 30,
+        };
+        say('retrying in ${wait}s (attempt $attempt)');
+        await Future.delayed(Duration(seconds: wait));
+      }
+    } finally {
+      _scanning = false;
+    }
+  }
+
+  /// One scan-and-connect attempt. Returns true only if we ended up connected.
+  Future<bool> _scanOnce(int attempt) async {
     _set(() => link = LinkState.scanning);
     final found = Completer<BluetoothDevice>();
+
+    // Cancel before reassigning. Leaking one listener per attempt meant every
+    // reconnect added another live subscription to the same stream.
+    await _scanSub?.cancel();
     _scanSub = FlutterBluePlus.scanResults.listen((results) {
       for (final r in results) {
         rssi = r.rssi;
@@ -259,25 +299,51 @@ class CaptureController extends ChangeNotifier {
       }
     });
 
-    await FlutterBluePlus.startScan(
-      withServices: [OmiGatt.audioService],
-      timeout: const Duration(seconds: 20),
-    );
-
     try {
+      // A scan left running from a previous attempt makes startScan throw.
+      if (FlutterBluePlus.isScanningNow) await FlutterBluePlus.stopScan();
+
+      await FlutterBluePlus.startScan(
+        withServices: [OmiGatt.audioService],
+        timeout: const Duration(seconds: 20),
+      );
+
       final device = await found.future.timeout(const Duration(seconds: 20));
       await FlutterBluePlus.stopScan();
-      await _connect(device);
-    } on TimeoutException {
-      await FlutterBluePlus.stopScan();
       await _scanSub?.cancel();
+      _scanSub = null;
+
+      await _connect(device);
+      return _linkUp;
+    } on TimeoutException {
       _set(() => link = LinkState.notFound);
-      // Keep looking. The pendant may simply be off, and should be picked up
-      // when it returns without anyone touching the app.
-      if (!_stopping) {
-        await Future.delayed(const Duration(seconds: 5));
-        if (!_stopping) await _scan();
-      }
+      say('not found on attempt $attempt');
+      return false;
+    } catch (e) {
+      // Connection failures land here. 133 is usually GATT client exhaustion,
+      // which is worth naming because it looks like a random Bluetooth fault.
+      final detail = '$e'.contains('133')
+          ? '$e (error 133 — usually a leaked GATT client)'
+          : '$e';
+      say('connect failed on attempt $attempt: $detail');
+      // Release the half-open connection. A failed connect that is never
+      // disconnected leaks the GATT client, Android caps the system near
+      // thirty, and exhaustion is what produces 133 on every later attempt —
+      // so not cleaning up here is what turns one bad attempt into a device
+      // that can never reconnect until Bluetooth is toggled.
+      try {
+        await _connSub?.cancel();
+        _connSub = null;
+        await _device?.disconnect();
+      } catch (_) {}
+      _set(() => link = LinkState.idle);
+      return false;
+    } finally {
+      try {
+        if (FlutterBluePlus.isScanningNow) await FlutterBluePlus.stopScan();
+      } catch (_) {}
+      await _scanSub?.cancel();
+      _scanSub = null;
     }
   }
 

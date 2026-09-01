@@ -321,8 +321,25 @@ def worker() -> None:
             )
             changed = False
             for path in pending:
-                d = proc.process_one(path, model, ffmpeg, ARGS.audio,
-                                     ARGS.text, dry_run=False)
+                # Per segment, not per pass. A single file the model chokes on
+                # used to abort the whole loop, so everything behind it queued
+                # up behind one bad recording and nothing drained at all.
+                try:
+                    d = proc.process_one(path, model, ffmpeg, ARGS.audio,
+                                         ARGS.text, dry_run=False)
+                except Exception as e:
+                    STATE.note_error(os.path.basename(path), e)
+                    # Moved aside rather than deleted or left in place. Deleting
+                    # destroys audio we failed to read, and leaving it means
+                    # retrying the same failure forever.
+                    failed = os.path.join(ARGS.incoming, "failed")
+                    os.makedirs(failed, exist_ok=True)
+                    try:
+                        os.replace(path, os.path.join(failed,
+                                                      os.path.basename(path)))
+                    except OSError:
+                        pass
+                    continue
                 if d is None:
                     continue
                 changed = True

@@ -236,6 +236,16 @@ class _ServerCard extends StatelessWidget {
           value: Uri.tryParse(c.serverBase)?.host ?? c.serverBase,
           warn: !c.hostReachable,
         ),
+        if (!c.hostReachable && c.serverError != null)
+          Padding(
+            padding: const EdgeInsets.only(left: 32, bottom: 8),
+            child: Text(
+              c.serverError!,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.error,
+                  ),
+            ),
+          ),
         _Row(
           icon: Icons.upload_outlined,
           label: 'Waiting to send',
@@ -348,20 +358,31 @@ class _Row extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final valueStyle = Theme.of(context).textTheme.bodyMedium?.copyWith(
+          color: warn ? scheme.error : scheme.onSurfaceVariant,
+        );
+
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Icon(icon, size: 20,
               color: warn ? scheme.error : scheme.onSurfaceVariant),
           const SizedBox(width: 12),
-          Expanded(child: Text(label)),
-          Text(
-            value,
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: warn ? scheme.error : scheme.onSurfaceVariant,
-                  fontFeatures: const [],
-                ),
+          // Both sides are flexible with fixed proportions. Letting the value
+          // size itself and giving the label the remainder squeezed "Battery"
+          // down to one character per line the moment a value got long, and a
+          // hostname overflowed the row entirely.
+          Expanded(flex: 4, child: Text(label)),
+          const SizedBox(width: 8),
+          Expanded(
+            flex: 5,
+            child: Text(
+              value,
+              textAlign: TextAlign.end,
+              style: valueStyle,
+            ),
           ),
         ],
       ),

@@ -75,6 +75,55 @@ def to_wav(seg: read_segment.Segment, ffmpeg: str, out_path: str) -> None:
         os.unlink(opus_path)
 
 
+# Parakeet's ONNX export carries a fixed positional dimension and fails outright
+# past a few minutes:
+#
+#   Attempting to broadcast an axis by a dimension other than 1. 58 by 5058
+#
+# The pendant produces eight minute recordings when someone talks continuously,
+# so this is the normal case rather than an edge case. Audio longer than this is
+# split and the pieces transcribed separately.
+CHUNK_SECONDS = 120
+
+
+def recognize(model, wav_path: str) -> str:
+    """Transcribe a WAV of any length, splitting it if the model cannot cope.
+
+    Chunks do not overlap. Overlapping would duplicate whatever words fall in
+    the overlap, and a duplicated phrase reads as something the speaker
+    actually said twice, which is worse than a word clipped at a seam.
+    """
+    import wave
+
+    with wave.open(wav_path, "rb") as w:
+        total = w.getnframes()
+        params = w.getparams()
+        frames_per_chunk = w.getframerate() * CHUNK_SECONDS
+
+    if total <= frames_per_chunk:
+        return model.recognize(wav_path)
+
+    pieces: list[str] = []
+    with wave.open(wav_path, "rb") as w:
+        while True:
+            data = w.readframes(frames_per_chunk)
+            if not data:
+                break
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                part = tmp.name
+            try:
+                with wave.open(part, "wb") as out:
+                    out.setparams(params)
+                    out.writeframes(data)
+                text = model.recognize(part).strip()
+                if text:
+                    pieces.append(text)
+            finally:
+                os.unlink(part)
+
+    return " ".join(pieces)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("paths", nargs="+", help="segment files, globs, or a directory")
@@ -133,7 +182,7 @@ def main() -> None:
 
         try:
             t0 = time.time()
-            text = model.recognize(wav_path)
+            text = recognize(model, wav_path)
             elapsed = time.time() - t0
         finally:
             if cleanup:

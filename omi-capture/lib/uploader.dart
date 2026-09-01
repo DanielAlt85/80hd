@@ -72,14 +72,39 @@ class Uploader {
 
   bool _running = false;
 
+  /// Why the last reachability check failed, in words a person can act on.
+  /// "Unreachable" covers several very different problems and points at none
+  /// of them; a name that will not resolve needs a different fix from a
+  /// machine that is switched off.
+  String? lastError;
+
   Future<bool> reachable() async {
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 5);
     try {
       final req = await client.getUrl(Uri.parse('$base/health'));
       final res = await req.close().timeout(const Duration(seconds: 5));
       await res.drain<void>();
-      return res.statusCode == 200;
-    } catch (_) {
+      if (res.statusCode == 200) {
+        lastError = null;
+        return true;
+      }
+      lastError = 'Server answered ${res.statusCode}';
+      return false;
+    } on SocketException catch (e) {
+      final host = Uri.tryParse(base)?.host ?? base;
+      lastError = e.osError?.errorCode == 7 ||
+              e.message.contains('Failed host lookup')
+          // Specifically the MagicDNS case, which is a toggle rather than a
+          // network fault, and is invisible unless we name it.
+          ? 'Cannot look up $host. If this is a Tailscale name, turn on '
+              '"Use Tailscale DNS" in the Tailscale app.'
+          : 'Cannot reach $host';
+      return false;
+    } on HandshakeException {
+      lastError = 'The server\'s certificate was rejected';
+      return false;
+    } catch (e) {
+      lastError = '$e';
       return false;
     } finally {
       client.close();
