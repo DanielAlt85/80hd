@@ -14,9 +14,10 @@ import 'package:flutter/services.dart';
 class Settings {
   static const _channel = MethodChannel('omi_capture/service');
 
-  /// Where finished audio is sent. A `tailscale serve` URL by default, which
-  /// works from any network the phone happens to be on and needs nothing opened
-  /// on the host.
+  /// Where finished audio is sent. A NordVPN Meshnet address by default; see
+  /// Uploader.defaultBase for why it is not Tailscale. Deliberately editable in
+  /// the app: this is the setting most likely to need changing, and needing a
+  /// rebuild to move the server was already painful once.
   String serverUrl;
 
   /// Silence the pendant for this long on a double press.
@@ -26,7 +27,7 @@ class Settings {
   int linkAlertMinutes;
 
   Settings({
-    this.serverUrl = 'https://laptop-6r23fikn.tailaf1550.ts.net',
+    this.serverUrl = 'http://100.70.96.212:8723',
     this.pauseMinutes = 60,
     this.linkAlertMinutes = 5,
   });

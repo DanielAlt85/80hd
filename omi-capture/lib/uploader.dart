@@ -39,25 +39,27 @@ class UploadResult {
 }
 
 class Uploader {
-  /// The host, as a full base URL.
+  /// The host, as a full base URL. Only a default — the real value is a
+  /// setting, because which mesh carries this turned out to be the least
+  /// stable decision in the project.
   ///
-  /// This is a `tailscale serve` endpoint rather than an address and port. That
-  /// matters for a reason beyond tidiness: serve is proxied by the Tailscale
-  /// daemon, which already holds its own firewall permission, so nothing has to
-  /// be opened on the host. Pointing at the raw tailnet IP instead means
-  /// Windows Firewall gets a vote, and on a machine whose wifi is classified
-  /// Public it votes no.
+  /// This is a NordVPN Meshnet address. Tailscale was the original choice and
+  /// is the better tool, but NordVPN on the host captures the default route and
+  /// no split-tunnel configuration would release tailscaled, so Tailscale's own
+  /// traffic egressed through a Nord exit server and no peer could reach this
+  /// machine. Using Nord's own mesh removes the fight rather than winning it.
   ///
-  /// It is also a real HTTPS certificate, so the traffic is encrypted twice
-  /// over — once by TLS, once by WireGuard — and Dart validates it without any
-  /// certificate pinning of ours.
+  /// Worth knowing if this ever stops working: Nord announced Meshnet's
+  /// shutdown for December 2025 and reversed after public backlash. It is
+  /// supported but was close to deleted, so treat it as replaceable — which is
+  /// why this is a setting and not a constant.
   ///
   /// Override for testing over the USB cable:
   ///   adb reverse tcp:8723 tcp:8723
   ///   flutter build apk --debug --dart-define=OMI_URL=http://127.0.0.1:8723
   static const defaultBase = String.fromEnvironment(
     'OMI_URL',
-    defaultValue: 'https://laptop-6r23fikn.tailaf1550.ts.net',
+    defaultValue: 'http://100.70.96.212:8723',
   );
 
   final String base;
