@@ -1,24 +1,30 @@
-"""Turn transcripts into voice notes in the vault.
+"""Write voice notes into an Obsidian vault.
 
-One note per conversation, not per burst. The pendant's detector fires on
-sound, so a single conversation arrives as a scatter of bursts with silences
-between them; a note per burst would be a vault full of fragments. Bursts
-closer together than the gap threshold are one conversation.
+Conventions follow how Steph Ango (Obsidian's CEO) structures his own vault,
+because an automated writer should follow a convention someone actually lives
+with rather than one invented here:
 
-Flat vault, no folders, no index notes. Notes link to each other; nothing
-maintains a list.
+  - Subject matter goes in `topics:` as wikilinks, never as tags. Links to notes
+    that do not exist yet are the point, not a bug — an unresolved [[Sourdough]]
+    still collects backlinks and shows in the graph, so the vault assembles
+    itself without us creating anything.
+  - `categories:` is the primary grouping and is also links.
+  - `tags:` stay a small closed vocabulary describing the KIND of note, not what
+    it is about. Nested as domain/facet.
+  - Dates are bare YYYY-MM-DD. Folders are not used for organisation.
+  - Properties earn their place by being something you would sort or filter by.
+    Duration, burst counts and packet statistics are not, and are gone.
 
-The raw transcript is what gets written. Cleanup — correcting against a
-glossary, making it readable, summarising — is a later stage that reads these,
-and the raw text stays beside whatever it produces. A cleanup pass that loses
-something has to be recoverable.
+One note per conversation, not per recording. The pendant's detector fires on
+sound, so one conversation arrives as a scatter of recordings.
 
-Regenerating is safe: notes are keyed by conversation start, so a late-arriving
-segment rewrites its conversation's note rather than creating a second one.
+Nothing is ever dropped. Music, television and unintelligible audio still get a
+note, tagged by kind so they can be filtered or bulk-deleted later. The model
+that classifies them is wrong sometimes, and deleting on its judgement is the
+one irreversible act in this pipeline.
 
-Usage:
-    python vault.py
-    python vault.py --gap-minutes 15 --dry-run
+The raw transcript is always present, underneath whatever the model wrote. A bad
+summary should be an annoyance, never a loss.
 """
 
 from __future__ import annotations
@@ -28,13 +34,20 @@ import glob
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-# Bursts further apart than this start a new conversation. Ten minutes is a
-# guess that wants revisiting against real days: too short splits one meeting
-# into five notes, too long welds the morning to the afternoon.
-DEFAULT_GAP = timedelta(minutes=10)
+import summarize as summariser
+
+# Recordings further apart than this start a new conversation. Ten minutes
+# welded an entire afternoon into one note; four keeps a meeting together
+# without joining breakfast to dinner.
+DEFAULT_GAP_MINUTES = 4
+
+CATEGORY = "Voice notes"
+
+# Characters Windows and Obsidian will not accept in a filename.
+ILLEGAL = re.compile(r'[\\/:*?"<>|#^\[\]]')
 
 
 @dataclass
@@ -48,6 +61,24 @@ class Entry:
     @property
     def ended_at(self) -> datetime:
         return self.started_at + timedelta(seconds=self.audio_seconds)
+
+
+@dataclass
+class Conversation:
+    entries: list[Entry]
+    summary: summariser.Summary = field(default_factory=summariser.Summary)
+
+    @property
+    def started_at(self) -> datetime:
+        return self.entries[0].started_at
+
+    @property
+    def transcript(self) -> str:
+        return " ".join(e.text for e in self.entries if e.text).strip()
+
+    @property
+    def lost_packets(self) -> int:
+        return sum(e.discontinuities for e in self.entries)
 
 
 def load(text_dir: str) -> list[Entry]:
@@ -68,103 +99,144 @@ def load(text_dir: str) -> list[Entry]:
     return entries
 
 
-def group(entries: list[Entry], gap: timedelta) -> list[list[Entry]]:
-    conversations: list[list[Entry]] = []
+def group(entries: list[Entry], gap: timedelta) -> list[Conversation]:
+    out: list[list[Entry]] = []
     for e in entries:
-        if conversations and e.started_at - conversations[-1][-1].ended_at <= gap:
-            conversations[-1].append(e)
+        if out and e.started_at - out[-1][-1].ended_at <= gap:
+            out[-1].append(e)
         else:
-            conversations.append([e])
-    return conversations
+            out.append([e])
+    return [Conversation(g) for g in out]
 
 
-def slug(dt: datetime) -> str:
-    return dt.strftime("%Y-%m-%d %H%M")
+def link(name: str) -> str:
+    """A wikilink safe to sit inside YAML."""
+    return '"[[' + ILLEGAL.sub("", name).strip() + ']]"'
 
 
-def render(convo: list[Entry]) -> str:
-    start = convo[0].started_at
-    end = convo[-1].ended_at
-    speech = sum(e.audio_seconds for e in convo)
-    span = (end - start).total_seconds()
-    lost = sum(e.discontinuities for e in convo)
+def stem(convo: Conversation) -> str:
+    """`YYYY-MM-DD HHMM Descriptive phrase`, or just the timestamp.
 
-    lines: list[str] = []
-    lines.append("---")
-    lines.append(f"date: {start.strftime('%Y-%m-%d')}")
-    lines.append(f"start: {start.strftime('%H:%M:%S')}")
-    lines.append(f"end: {end.strftime('%H:%M:%S')}")
-    lines.append(f"speech_seconds: {round(speech, 1)}")
-    lines.append(f"elapsed_seconds: {round(span, 1)}")
-    lines.append(f"bursts: {len(convo)}")
+    The date prefix keeps notes sortable and unique; the phrase makes them
+    findable in the quick switcher. Kepano titles quick capture by timestamp and
+    reserves sentence titles for distilled notes, and a meeting note in his
+    vault is exactly this hybrid.
+    """
+    prefix = convo.started_at.strftime("%Y-%m-%d %H%M")
+    title = convo.summary.title
+    if not title:
+        return prefix
+    return f"{prefix} {ILLEGAL.sub('', title).strip()}"
+
+
+def existing_path(vault: str, convo: Conversation) -> str | None:
+    """Find a note already written for this conversation.
+
+    Notes are matched on the timestamp prefix, not the whole filename. The
+    descriptive half can change when a transcript is re-summarised, and renaming
+    a note breaks every link into it — so an existing note keeps its name and
+    only its contents are rewritten.
+    """
+    prefix = convo.started_at.strftime("%Y-%m-%d %H%M")
+    for path in glob.glob(os.path.join(vault, f"{prefix}*.md")):
+        return path
+    return None
+
+
+def render(convo: Conversation) -> str:
+    s = convo.summary
+    started = convo.started_at
+
+    kind_tag = {
+        "conversation": "voice/conversations",
+        "monologue": "voice/monologues",
+        "media": "voice/media",
+    }.get(s.kind, "voice/unclear")
+
+    lines: list[str] = ["---"]
+    lines.append("categories:")
+    lines.append(f"  - {link(CATEGORY)}")
+    lines.append(f"created: {started.strftime('%Y-%m-%d')}")
+    if s.topics:
+        lines.append("topics:")
+        lines.extend(f"  - {link(t)}" for t in s.topics)
+    if s.people:
+        lines.append("people:")
+        lines.extend(f"  - {link(p)}" for p in s.people)
+    lines.append("tags:")
+    lines.append(f"  - {kind_tag}")
     lines.append("source: omi-cv1")
-    lines.append("transcript: raw")
-    lines.append("speakers: unattributed")
     lines.append("---")
     lines.append("")
-    lines.append(f"# {start.strftime('%A %-d %B, %-I:%M %p')}"
-                 if os.name != "nt"
-                 else f"# {start.strftime('%A %d %B, %I:%M %p').replace(' 0', ' ')}")
+
+    lines.append(f"# {s.title or started.strftime('%A %d %B, %I:%M %p')}")
+    lines.append("")
+    lines.append(f"*{started.strftime('%A %d %B %Y, %I:%M %p')}*")
     lines.append("")
 
-    if lost:
-        lines.append(f"> {lost} packet gap(s) in this conversation. Speech the "
-                     f"pendant captured did not reach the phone, so something "
-                     f"is missing below and it is not marked inline.")
+    if s.summary:
+        lines.append(f"> {s.summary}")
         lines.append("")
 
-    # Elapsed is wall clock, speech is what was actually transmitted. The
-    # difference is silence, and saying so stops the reader assuming the
-    # transcript is continuous.
-    if span > speech * 1.5:
-        quiet = round((span - speech) / 60, 1)
-        lines.append(f"> Spans {round(span / 60, 1)} minutes but contains "
-                     f"{round(speech / 60, 1)} minutes of speech. "
-                     f"{quiet} minutes of silence between bursts.")
+    # Only when speech was genuinely lost. A note that cries wolf about gaps
+    # teaches you to ignore the one time it matters.
+    if convo.lost_packets:
+        lines.append(f"> [!warning] {convo.lost_packets} gap(s) — some speech "
+                     f"never reached the phone, so the transcript is incomplete.")
         lines.append("")
 
-    for e in convo:
-        lines.append(f"**{e.started_at.strftime('%H:%M:%S')}**  {e.text}")
-        lines.append("")
+    lines.append("## Transcript")
+    lines.append("")
+    for e in convo.entries:
+        if e.text:
+            lines.append(f"**{e.started_at.strftime('%H:%M')}** {e.text}")
+            lines.append("")
 
     lines.append("---")
     lines.append("")
-    lines.append("Raw transcript, uncorrected. Speaker labels are absent rather "
-                 "than guessed.")
+    lines.append("Raw transcript, uncorrected. Speech recognition makes "
+                 "mistakes and speakers are not distinguished.")
     lines.append("")
     return "\n".join(lines)
 
 
-def title(convo: list[Entry]) -> str:
-    """Filename stem. Time-keyed, so a rerun rewrites rather than duplicates.
-
-    Deliberately not derived from the content: a title generated from a raw
-    transcript changes whenever the transcript changes, and a note that renames
-    itself breaks every link into it.
-    """
-    return f"{slug(convo[0].started_at)} voice note"
-
-
-def main_for(text_dir: str, vault_dir: str, gap_minutes: int,
-             dry_run: bool = False) -> int:
-    """The daemon calls this directly rather than shelling out to main()."""
+def write_notes(text_dir: str, vault_dir: str, gap_minutes: int,
+                dry_run: bool = False, verbose: bool = False) -> int:
     os.makedirs(vault_dir, exist_ok=True)
     entries = load(text_dir)
     if not entries:
         return 0
 
+    conversations = group(entries, timedelta(minutes=gap_minutes))
+    have_model = summariser.available()
+    if verbose:
+        print(f"{len(entries)} transcript(s) -> {len(conversations)} "
+              f"conversation(s)"
+              + ("" if have_model else "  [no model; titles will be timestamps]"))
+
     written = 0
-    for convo in group(entries, timedelta(minutes=gap_minutes)):
-        path = os.path.join(vault_dir, f"{title(convo)}.md")
+    for convo in conversations:
+        if have_model:
+            convo.summary = summariser.summarize(convo.transcript)
+
         body = render(convo)
-        if os.path.exists(path):
+        path = existing_path(vault_dir, convo)
+        if path is None:
+            path = os.path.join(vault_dir, f"{stem(convo)}.md")
+        elif os.path.exists(path):
             with open(path, encoding="utf-8") as fh:
                 if fh.read() == body:
                     continue
+
+        if verbose:
+            print(f"  {'would write' if dry_run else 'wrote'}  "
+                  f"{os.path.basename(path)}"
+                  f"  [{convo.summary.kind}]")
         if not dry_run:
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(body)
         written += 1
+
     return written
 
 
@@ -172,40 +244,13 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--text", default="D:/omi/transcripts")
     ap.add_argument("--vault", default="D:/omi/vault/Omi Notes")
-    ap.add_argument("--gap-minutes", type=int, default=10)
+    ap.add_argument("--gap-minutes", type=int, default=DEFAULT_GAP_MINUTES)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
-    os.makedirs(args.vault, exist_ok=True)
-    entries = load(args.text)
-    if not entries:
-        print("no transcripts")
-        return
-
-    conversations = group(entries, timedelta(minutes=args.gap_minutes))
-    print(f"{len(entries)} transcript(s) -> {len(conversations)} conversation(s)")
-
-    written = 0
-    for convo in conversations:
-        name = f"{title(convo)}.md"
-        path = os.path.join(args.vault, name)
-        body = render(convo)
-
-        if os.path.exists(path):
-            with open(path, encoding="utf-8") as fh:
-                if fh.read() == body:
-                    print(f"  unchanged  {name}")
-                    continue
-
-        preview = re.sub(r"\s+", " ", convo[0].text)[:70]
-        print(f"  {'would write' if args.dry_run else 'wrote'}  {name}  "
-              f"({len(convo)} burst(s))  {preview}")
-        if not args.dry_run:
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write(body)
-        written += 1
-
-    print(f"{written} note(s) {'would change' if args.dry_run else 'written'}")
+    n = write_notes(args.text, args.vault, args.gap_minutes,
+                    dry_run=args.dry_run, verbose=True)
+    print(f"{n} note(s) {'would change' if args.dry_run else 'written'}")
 
 
 if __name__ == "__main__":

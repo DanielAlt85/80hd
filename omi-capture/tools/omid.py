@@ -382,7 +382,7 @@ def worker() -> None:
                 # Rebuild notes rather than appending. A late segment belongs to
                 # a conversation that may already have a note, and rewriting is
                 # cheaper to reason about than patching.
-                vaultmod.main_for(ARGS.text, ARGS.vault, ARGS.gap_minutes)
+                vaultmod.write_notes(ARGS.text, ARGS.vault, ARGS.gap_minutes)
 
             with STATE.lock:
                 STATE.last_pass = datetime.now(timezone.utc)
@@ -429,7 +429,8 @@ def main() -> None:
     ap.add_argument("--text", default="D:/omi/transcripts")
     ap.add_argument("--vault", default="D:/omi/vault/Omi Notes")
     ap.add_argument("--retain-days", type=int, default=7)
-    ap.add_argument("--gap-minutes", type=int, default=10)
+    ap.add_argument("--gap-minutes", type=int,
+                    default=vaultmod.DEFAULT_GAP_MINUTES)
     ap.add_argument("--interval", type=int, default=30)
     ap.add_argument("--port", type=int, default=8723)
     ap.add_argument("--host", default="0.0.0.0")
